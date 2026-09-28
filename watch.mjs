@@ -263,34 +263,44 @@ async function downloadArtifacts(runId) {
   for (const artifact of artData.artifacts) {
     log(`Downloading artifact: ${C.bold}${artifact.name}${C.reset} (${(artifact.size_in_bytes / 1024 / 1024).toFixed(1)} MB)...`);
 
-    const { url } = await octokit.actions.downloadArtifact({
-      owner: OWNER, repo: REPO,
-      artifact_id: artifact.id,
-      archive_format: "zip",
-    }).then(r => ({ url: r.url })).catch(async (e) => {
-      // Octokit follows redirect — extract URL from headers
-      if (e.status === 302) return { url: e.response?.headers?.location };
-      throw e;
-    });
+    // Step 1: Ask GitHub API for the download URL — it returns a 302 redirect
+    // to an Azure Blob Storage SAS URL that has its OWN auth embedded in the URL.
+    // We must NOT forward the GitHub Authorization header to Azure or it will fail.
+    let azureUrl;
+    try {
+      // octokit follows redirects by default — we need the raw redirect location
+      const resp = await fetch(
+        `https://api.github.com/repos/${OWNER}/${REPO}/actions/artifacts/${artifact.id}/zip`,
+        {
+          headers: {
+            Authorization: `token ${TOKEN}`,
+            Accept: "application/vnd.github.v3+json",
+          },
+          redirect: "manual", // capture the 302 without following it
+        }
+      );
+      azureUrl = resp.headers.get("location");
+      if (!azureUrl) throw new Error("No redirect location in response");
+      info(`Redirect URL obtained (${azureUrl.slice(0, 80)}...)`);
+    } catch (e) {
+      err(`Could not get download URL for ${artifact.name}: ${e.message}`);
+      continue;
+    }
 
-    // Fetch the zip
-    const resp = await fetch(url || artifact.archive_download_url, {
-      headers: { Authorization: `token ${TOKEN}` },
-      redirect: "follow",
-    });
-
+    // Step 2: Download from Azure WITHOUT Authorization header (SAS URL is self-authenticating)
+    const resp = await fetch(azureUrl, { redirect: "follow" });
     if (!resp.ok) throw new Error(`Failed to download: ${resp.statusText}`);
 
     const buffer = Buffer.from(await resp.arrayBuffer());
     const zipPath = path.join(OUTPUT_DIR, `${artifact.name}.zip`);
     fs.writeFileSync(zipPath, buffer);
 
-    // Extract into named folder
+    // Step 3: Extract into named folder
     const extractDir = path.join(OUTPUT_DIR, artifact.name);
     fs.mkdirSync(extractDir, { recursive: true });
     const zip = new AdmZip(zipPath);
     zip.extractAllTo(extractDir, true);
-    fs.unlinkSync(zipPath); // remove zip after extraction
+    fs.unlinkSync(zipPath);
 
     ok(`Saved to: ${extractDir}`);
   }
