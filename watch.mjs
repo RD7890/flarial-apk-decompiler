@@ -152,79 +152,97 @@ async function analyzeAndFix(logs, attempt) {
   const fixes = [];
 
   // Fix: Ghidra version not found → try a known stable version
-  if (logs.includes("setup-ghidra") || logs.includes("Ghidra") && logs.includes("404")) {
-    workflow = workflow.replace(/version: '[\d.]+'/g, "version: '10.4'");
-    fixes.push("Rolled back Ghidra to v10.4");
+  // Fix: Ghidra action version mismatch — only match the setup-ghidra 'version:' input,
+  // NOT the java-version input (which uses 'java-version:' key, so this is safe)
+  if (logs.includes("Could not find satisfied version") && logs.includes("setup-ghidra")) {
+    workflow = workflow.replace(
+      /uses: antoniovazquezblanco\/setup-ghidra@[^\n]+\n(\s+with:\n\s+version: ')[^']+'/,
+      "uses: antoniovazquezblanco/setup-ghidra@v2.2.1\n$1'11.3.2'"
+    );
+    fixes.push("Corrected Ghidra version to 11.3.2 (known supported)");
     fixed = true;
   }
 
-  // Fix: JADX not found / 404
-  if (logs.includes("jadx") && (logs.includes("404") || logs.includes("No such file"))) {
-    workflow = workflow.replace(/JADX_VERSION="[\d.]+"/g, 'JADX_VERSION="1.4.7"');
-    fixes.push("Rolled back JADX to v1.4.7");
+  // Fix: JADX download 404 - roll back version in download URL
+  if ((logs.toLowerCase().includes("jadx") || logs.includes("jadx-")) && logs.includes("404")) {
+    workflow = workflow.replace(
+      /jadx\/releases\/download\/v[\d.]+\/jadx-[\d.]+\.zip/g,
+      "jadx/releases/download/v1.5.0/jadx-1.5.0.zip"
+    );
+    fixes.push("Rolled back JADX download URL to v1.5.0");
     fixed = true;
   }
 
-  // Fix: Apktool version issue
-  if (logs.includes("apktool") && logs.includes("404")) {
-    workflow = workflow.replace(/APKTOOL_VERSION="[\d.]+"/g, 'APKTOOL_VERSION="2.9.1"');
-    fixes.push("Rolled back Apktool to v2.9.1");
+  // Fix: Apktool download 404
+  if (logs.toLowerCase().includes("apktool") && logs.includes("404")) {
+    workflow = workflow.replace(
+      /apktool\/releases\/download\/v[\d.]+\/apktool_[\d.]+\.jar/g,
+      "apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
+    );
+    workflow = workflow.replace(/apktool_[\d.]+\.jar" -O/g, 'apktool_2.9.3.jar" -O');
+    fixes.push("Rolled back Apktool download to v2.9.3");
     fixed = true;
   }
 
-  // Fix: Java heap/OOM for Ghidra
-  if (logs.includes("OutOfMemoryError") || logs.includes("Java heap")) {
-    workflow = workflow.replace("-Xmx6g", "-Xmx8g");
-    fixes.push("Increased Ghidra heap to 8GB");
+  // Fix: Java heap / OOM
+  if (logs.includes("OutOfMemoryError") || logs.includes("Java heap space")) {
+    workflow = workflow.replace(/-Xmx\d+g/g, "-Xmx8g");
+    fixes.push("Increased Ghidra JVM heap to 8GB");
     fixed = true;
   }
 
-  // Fix: Ghidra script not found
+  // Fix: Ghidra script not found in script path
   if (logs.includes("ExportDecompiledC.py") && logs.includes("not found")) {
-    // Re-add the script path absolute
     workflow = workflow.replace(
       '-scriptPath "$(pwd)/ghidra_scripts"',
       '-scriptPath "$(pwd)/ghidra_scripts" -scriptPath "$(pwd)"'
     );
-    fixes.push("Added fallback scriptPath for Ghidra");
+    fixes.push("Added fallback Ghidra scriptPath");
     fixed = true;
   }
 
-  // Fix: Permission denied on apktool
-  if (logs.includes("Permission denied") && logs.includes("apktool")) {
-    workflow = workflow.replace(
-      "sudo chmod +x /usr/local/bin/apktool",
-      "sudo chmod +x /usr/local/bin/apktool\n          sudo chmod +x /usr/local/bin/apktool.jar"
-    );
-    fixes.push("Fixed apktool permission issue");
-    fixed = true;
+  // Fix: unzip missing
+  if (logs.includes("unzip: command not found") || logs.includes("unzip: not found")) {
+    if (!workflow.includes("Install unzip")) {
+      workflow = workflow.replace(
+        "- name: Extract .so files",
+        "- name: Install unzip\n        run: sudo apt-get install -y unzip\n\n      - name: Extract .so files"
+      );
+      fixes.push("Added unzip install step");
+      fixed = true;
+    }
   }
 
-  // Fix: unzip not installed
-  if (logs.includes("unzip: command not found")) {
+  // Fix: Permission denied on apktool jar
+  if (logs.includes("Permission denied") && logs.toLowerCase().includes("apktool")) {
     workflow = workflow.replace(
-      "- name: Extract .so files from config.arm64_v8a.apk",
-      "- name: Install unzip\n        run: sudo apt-get install -y unzip\n\n      - name: Extract .so files from config.arm64_v8a.apk"
+      "sudo chmod +x /usr/local/bin/apktool\n",
+      "sudo chmod +x /usr/local/bin/apktool\n          sudo chmod 644 /usr/local/bin/apktool.jar\n"
     );
-    fixes.push("Added unzip installation step");
+    fixes.push("Fixed apktool jar permissions");
     fixed = true;
   }
 
   if (fixes.length > 0) {
     fs.writeFileSync(workflowPath, workflow);
     ok(`Applied ${fixes.length} fix(es): ${fixes.join(", ")}`);
-    // Commit and push the fix
-    execSync(`cd "${__dirname}" && git add .github/workflows/decompile.yml && git commit -m "🔧 Auto-fix attempt ${attempt}: ${fixes.join(', ')}" && git push`, { stdio: "inherit" });
+    try {
+      // Use || true trick so git doesn't crash if nothing changed
+      execSync(
+        `cd "${__dirname}" && git add .github/workflows/decompile.yml && ` +
+        `git diff --cached --quiet || git commit -m "🔧 Auto-fix attempt ${attempt}: ${fixes.join(', ')}" && git push`,
+        { stdio: "inherit" }
+      );
+    } catch (commitErr) {
+      warn(`Git note: ${commitErr.message?.slice(0, 120)}`);
+    }
     return true;
   }
 
-  if (!fixed) {
-    warn("No automatic fix found for these errors. Saving logs for manual review...");
-    fs.writeFileSync(path.resolve(__dirname, `failure-logs-attempt-${attempt}.txt`), logs);
-    err("Could not auto-fix. Check failure-logs-attempt-*.txt");
-  }
-
-  return fixed;
+  warn("No automatic fix matched these errors. Saving logs for manual review...");
+  fs.writeFileSync(path.resolve(__dirname, `failure-logs-attempt-${attempt}.txt`), logs);
+  err(`Check: failure-logs-attempt-${attempt}.txt`);
+  return false;
 }
 
 // ── Download artifacts ────────────────────────────────────────────

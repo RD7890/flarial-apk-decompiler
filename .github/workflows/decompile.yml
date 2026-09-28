@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ─────────────────────────────────────────
-  # Job 1: Decompile Java/Kotlin from base APK
-  # ─────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────
+  # Job 1: Decompile Java/Kotlin from base APK using JADX v1.5.6
+  # ─────────────────────────────────────────────────────────────
   decompile-java:
     name: Java/Kotlin (JADX)
     runs-on: ubuntu-latest
@@ -21,14 +21,16 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '10.4'
+          java-version: '17'
 
-      - name: Install JADX latest
+      - name: Install JADX 1.5.6
         run: |
-          JADX_VERSION="1.5.1"
-          wget -q "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" -O jadx.zip
+          wget -q "https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip" -O jadx.zip
           unzip -q jadx.zip -d jadx
           echo "$GITHUB_WORKSPACE/jadx/bin" >> $GITHUB_PATH
+
+      - name: Verify JADX
+        run: jadx --version
 
       - name: Decompile base APK (Flarial-1.3.15) with JADX
         run: |
@@ -60,9 +62,9 @@ jobs:
           path: decompiled/
           retention-days: 7
 
-  # ─────────────────────────────────────────
-  # Job 2: Decode XML & resources (Apktool)
-  # ─────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: Decode XML & resources using Apktool v3.0.3
+  # ──────────────────────────────────────────────────────────────
   decode-resources:
     name: XML/Resources (Apktool)
     runs-on: ubuntu-latest
@@ -74,15 +76,16 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '10.4'
+          java-version: '17'
 
-      - name: Install latest Apktool
+      - name: Install Apktool 3.0.3
         run: |
-          APKTOOL_VERSION="2.9.3"
-          wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" -O /usr/local/bin/apktool.jar
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/apktool > /dev/null
-          echo 'exec java -jar /usr/local/bin/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool > /dev/null
+          wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar" -O /usr/local/bin/apktool.jar
+          printf '#!/bin/bash\nexec java -jar /usr/local/bin/apktool.jar "$@"\n' | sudo tee /usr/local/bin/apktool > /dev/null
           sudo chmod +x /usr/local/bin/apktool
+
+      - name: Verify Apktool
+        run: apktool --version
 
       - name: Decode base APK resources
         run: |
@@ -106,9 +109,9 @@ jobs:
           path: apktool-decoded/
           retention-days: 7
 
-  # ─────────────────────────────────────────
-  # Job 3: Decompile .so files (Ghidra Headless)
-  # ─────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: Decompile .so files using Ghidra 12.1.4 (Headless)
+  # ──────────────────────────────────────────────────────────────
   decompile-native:
     name: Native .so (Ghidra)
     runs-on: ubuntu-latest
@@ -120,12 +123,15 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '10.4'
+          java-version: '21'
 
-      - name: Setup Ghidra
-        uses: antoniovazquezblanco/setup-ghidra@v2.0.1
+      - name: Setup Ghidra 12.1.4
+        uses: antoniovazquezblanco/setup-ghidra@v2.2.1
         with:
-          version: '10.4'
+          version: '12.1.4'
+
+      - name: Install unzip
+        run: sudo apt-get install -y unzip
 
       - name: Extract .so files from config.arm64_v8a.apk
         run: |
@@ -134,7 +140,7 @@ jobs:
           echo "Extracted .so files:"
           ls -lh extracted_so/
 
-      - name: Create Ghidra decompiler script
+      - name: Create Ghidra decompiler Python script
         run: |
           mkdir -p ghidra_scripts
           cat << 'PYEOF' > ghidra_scripts/ExportDecompiledC.py
@@ -174,7 +180,7 @@ jobs:
           print("[+] Done: {}".format(output_file))
           PYEOF
 
-      - name: Decompile all .so files with Ghidra
+      - name: Decompile all .so files with Ghidra Headless
         run: |
           mkdir -p ghidra_output ghidra_projects
           export GHIDRA_OUTPUT_DIR="$(pwd)/ghidra_output"
@@ -193,17 +199,16 @@ jobs:
               -postScript ExportDecompiledC.py \
               -deleteProject \
               -max-cpu 4 \
-              -Xmx6g \
-              2>&1 | tail -n 20
+              2>&1 | tail -n 15
             echo "✅ Done: $lib_name"
           done
 
       - name: List decompiled native output
         run: |
           echo "=== Ghidra Output Files ==="
-          ls -lh ghidra_output/
-          echo "Total lines across all .c files:"
-          wc -l ghidra_output/*.c 2>/dev/null || echo "(none)"
+          ls -lh ghidra_output/ || echo "(empty)"
+          echo "Total lines:"
+          wc -l ghidra_output/*.c 2>/dev/null || echo "0"
 
       - name: Upload Native Decompiled Sources
         uses: actions/upload-artifact@v4
