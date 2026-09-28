@@ -1,0 +1,15 @@
+{
+  "name": "flarial-apk-decompiler-watcher",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Auto-watch & fix GitHub Actions decompilation pipeline for Flarial APKs",
+  "main": "watch.mjs",
+  "scripts": {
+    "watch": "node watch.mjs"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.1.1",
+    "adm-zip": "^0.5.12",
+    "node-fetch": "^3.3.2"
+  }
+}

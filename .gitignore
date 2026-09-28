@@ -1,0 +1,4 @@
+node_modules/
+ghidra_output/
+decompiled/
+failure-logs-*.txt

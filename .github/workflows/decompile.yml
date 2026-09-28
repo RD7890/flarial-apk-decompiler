@@ -1,0 +1,213 @@
+name: Flarial APK Full Decompilation
+
+on:
+  push:
+    paths:
+      - 'apks/**'
+  workflow_dispatch:
+
+jobs:
+  # ─────────────────────────────────────────
+  # Job 1: Decompile Java/Kotlin from base APK
+  # ─────────────────────────────────────────
+  decompile-java:
+    name: Java/Kotlin (JADX)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install JADX latest
+        run: |
+          JADX_VERSION="1.5.1"
+          wget -q "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" -O jadx.zip
+          unzip -q jadx.zip -d jadx
+          echo "$GITHUB_WORKSPACE/jadx/bin" >> $GITHUB_PATH
+
+      - name: Decompile base APK (Flarial-1.3.15) with JADX
+        run: |
+          mkdir -p decompiled/Flarial-1.3.15
+          jadx \
+            --threads-count 4 \
+            --deobf \
+            --show-bad-code \
+            -d decompiled/Flarial-1.3.15 \
+            apks/Flarial-1.3.15.apk
+          echo "✅ Flarial-1.3.15.apk decompiled"
+
+      - name: Decompile config.en APK (language resources)
+        run: |
+          mkdir -p decompiled/config.en
+          jadx --threads-count 2 -d decompiled/config.en apks/config.en.apk
+          echo "✅ config.en.apk decompiled"
+
+      - name: Decompile config.xxhdpi APK (drawable resources)
+        run: |
+          mkdir -p decompiled/config.xxhdpi
+          jadx --threads-count 2 -d decompiled/config.xxhdpi apks/config.xxhdpi.apk
+          echo "✅ config.xxhdpi.apk decompiled"
+
+      - name: Upload Java Sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-java-sources
+          path: decompiled/
+          retention-days: 7
+
+  # ─────────────────────────────────────────
+  # Job 2: Decode XML & resources (Apktool)
+  # ─────────────────────────────────────────
+  decode-resources:
+    name: XML/Resources (Apktool)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install latest Apktool
+        run: |
+          APKTOOL_VERSION="2.9.3"
+          wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" -O /usr/local/bin/apktool.jar
+          echo '#!/bin/bash' | sudo tee /usr/local/bin/apktool > /dev/null
+          echo 'exec java -jar /usr/local/bin/apktool.jar "$@"' | sudo tee -a /usr/local/bin/apktool > /dev/null
+          sudo chmod +x /usr/local/bin/apktool
+
+      - name: Decode base APK resources
+        run: |
+          apktool d apks/Flarial-1.3.15.apk -o apktool-decoded/Flarial-1.3.15 -f
+          echo "✅ Resources decoded for Flarial-1.3.15.apk"
+
+      - name: Decode config.en resources
+        run: |
+          apktool d apks/config.en.apk -o apktool-decoded/config.en -f
+          echo "✅ Resources decoded for config.en.apk"
+
+      - name: Decode config.xxhdpi resources
+        run: |
+          apktool d apks/config.xxhdpi.apk -o apktool-decoded/config.xxhdpi -f
+          echo "✅ Resources decoded for config.xxhdpi.apk"
+
+      - name: Upload Decoded Resources
+        uses: actions/upload-artifact@v4
+        with:
+          name: decoded-resources
+          path: apktool-decoded/
+          retention-days: 7
+
+  # ─────────────────────────────────────────
+  # Job 3: Decompile .so files (Ghidra Headless)
+  # ─────────────────────────────────────────
+  decompile-native:
+    name: Native .so (Ghidra)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Ghidra
+        uses: antoniovazquezblanco/setup-ghidra@v2.0.1
+        with:
+          version: '11.0.3'
+
+      - name: Extract .so files from config.arm64_v8a.apk
+        run: |
+          mkdir -p extracted_so
+          unzip -j apks/config.arm64_v8a.apk "lib/arm64-v8a/*.so" -d extracted_so
+          echo "Extracted .so files:"
+          ls -lh extracted_so/
+
+      - name: Create Ghidra decompiler script
+        run: |
+          mkdir -p ghidra_scripts
+          cat << 'PYEOF' > ghidra_scripts/ExportDecompiledC.py
+          # @author Antigravity Auto-Decompiler
+          # @category Analysis
+
+          from ghidra.app.decompiler import DecompInterface
+          from ghidra.util.task import ConsoleTaskMonitor
+          import os
+
+          monitor = ConsoleTaskMonitor()
+          ifc = DecompInterface()
+          ifc.openProgram(currentProgram)
+
+          prog_name = currentProgram.getName()
+          output_base = os.environ.get("GHIDRA_OUTPUT_DIR", "/tmp/ghidra_out")
+          output_file = os.path.join(output_base, prog_name + ".c")
+
+          print("[*] Decompiling {} -> {}".format(prog_name, output_file))
+
+          with open(output_file, "w") as f:
+              f.write("// ================================================\n")
+              f.write("// Ghidra Headless Auto-Decompiled: {}\n".format(prog_name))
+              f.write("// Architecture: ARM64\n")
+              f.write("// ================================================\n\n")
+
+              funcs = currentProgram.getFunctionManager().getFunctions(True)
+              for func in funcs:
+                  result = ifc.decompileFunction(func, 60, monitor)
+                  if result and result.decompileCompleted():
+                      f.write("// ---- {} at {} ----\n".format(func.getName(), func.getEntryPoint()))
+                      f.write(result.getDecompiledFunction().getC())
+                      f.write("\n\n")
+                  else:
+                      f.write("// [FAILED] Could not decompile: {}\n\n".format(func.getName()))
+
+          print("[+] Done: {}".format(output_file))
+          PYEOF
+
+      - name: Decompile all .so files with Ghidra
+        run: |
+          mkdir -p ghidra_output ghidra_projects
+          export GHIDRA_OUTPUT_DIR="$(pwd)/ghidra_output"
+
+          for so_file in extracted_so/*.so; do
+            lib_name=$(basename "$so_file")
+            echo ""
+            echo "═══════════════════════════════════════"
+            echo "  Decompiling: $lib_name"
+            echo "═══════════════════════════════════════"
+            "$GHIDRA_INSTALL_DIR/support/analyzeHeadless" \
+              "$(pwd)/ghidra_projects" \
+              "proj_${lib_name}" \
+              -import "$so_file" \
+              -scriptPath "$(pwd)/ghidra_scripts" \
+              -postScript ExportDecompiledC.py \
+              -deleteProject \
+              -max-cpu 4 \
+              -Xmx6g \
+              2>&1 | tail -n 20
+            echo "✅ Done: $lib_name"
+          done
+
+      - name: List decompiled native output
+        run: |
+          echo "=== Ghidra Output Files ==="
+          ls -lh ghidra_output/
+          echo "Total lines across all .c files:"
+          wc -l ghidra_output/*.c 2>/dev/null || echo "(none)"
+
+      - name: Upload Native Decompiled Sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-native-so
+          path: ghidra_output/
+          retention-days: 7
